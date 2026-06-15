@@ -23,7 +23,8 @@ const CACHE_DIRS = {
   daily: path.join(DATA_DIR, 'daily'),
   dailyBasic: path.join(DATA_DIR, 'daily_basic'),
   moneyflow: path.join(DATA_DIR, 'moneyflow'),
-  meta: path.join(DATA_DIR, 'meta')
+  meta: path.join(DATA_DIR, 'meta'),
+  snapshot: path.join(DATA_DIR, 'snapshot')
 };
 
 const conditionDefinitions = [
@@ -370,6 +371,10 @@ function cacheFile(kind, key) {
   return path.join(CACHE_DIRS[kind], `${key}.json`);
 }
 
+function snapshotFile() {
+  return path.join(CACHE_DIRS.snapshot, 'dataset.json');
+}
+
 async function getCachedDateRows(kind, tradeDate, fetcher) {
   const filePath = cacheFile(kind, tradeDate);
   const cached = await readJsonFile(filePath);
@@ -396,6 +401,14 @@ async function getCachedMeta(key, fetcher) {
     rows
   });
   return rows;
+}
+
+async function readSnapshot() {
+  return readJsonFile(snapshotFile());
+}
+
+async function writeSnapshot(payload) {
+  await writeJsonFile(snapshotFile(), payload);
 }
 
 async function getTradingDates() {
@@ -818,6 +831,7 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
         tushareHttpUrl: tsState.httpUrl,
         localCache
       };
+      await writeSnapshot(datasetCache);
       refreshJob.finishedAt = datasetCache.updatedAt;
       refreshJob.finishedAtChina = datasetCache.updatedAtChina;
       return datasetCache;
@@ -831,6 +845,18 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
   })();
 
   return refreshJob.promise;
+}
+
+async function loadSnapshotIntoCache() {
+  try {
+    await ensureCacheDirs();
+    const snapshot = await readSnapshot();
+    if (snapshot?.rows && Array.isArray(snapshot.rows)) {
+      datasetCache = snapshot;
+    }
+  } catch (error) {
+    console.warn('读取本地快照失败:', error.message || error);
+  }
 }
 
 function screenFromCache(activeConditions) {
@@ -940,6 +966,8 @@ setInterval(() => {
 setTimeout(() => {
   refreshDataset({ force: false, reason: 'startup' }).catch(() => {});
 }, 1000);
+
+await loadSnapshotIntoCache();
 
 app.listen(port, () => {
   console.log(`A 股股票筛选平台已启动: http://localhost:${port}`);
