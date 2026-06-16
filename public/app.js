@@ -1,5 +1,6 @@
 const refreshButton = document.querySelector('#refreshButton');
 const applyButton = document.querySelector('#applyButton');
+const dataState = document.querySelector('#dataState');
 const stockDataDate = document.querySelector('#stockDataDate');
 const updatedAt = document.querySelector('#updatedAt');
 const expiresAt = document.querySelector('#expiresAt');
@@ -240,6 +241,8 @@ function renderIncomplete(rows) {
 
 function renderPayload(payload) {
   const cache = payload.localCache;
+  const status = payload.dataStatus ?? {};
+  dataState.textContent = status.label ?? (cache ? '快照已加载' : '等待数据');
   stockDataDate.textContent = cache?.latestTradeDateChina ?? formatTradeDateChina(cache?.latestTradeDate) ?? '等待数据';
   updatedAt.textContent = payload.updatedAtChina ?? '正在更新';
   expiresAt.textContent = payload.expiresAtChina ?? '-';
@@ -258,8 +261,12 @@ function renderPayload(payload) {
     ? `更新至 ${cache.latestTradeDateChina ?? formatTradeDateChina(cache.latestTradeDate)}，${cache.historyDays} 日历史`
     : '正在建立';
   resultNote.textContent = payload.refreshJob?.running
-    ? `后台增量更新中，启动于 ${payload.refreshJob.startedAtChina}`
-    : `缓存内筛选，历史数据持续保留`;
+    ? `${status.label ?? '后台更新中'}，启动于 ${payload.refreshJob.startedAtChina}`
+    : `${status.detail ?? '缓存内筛选，历史数据持续保留'}`;
+  if (status.lastError) {
+    warningBox.hidden = false;
+    warningBox.textContent = `${status.label ?? '数据更新异常'}：${status.lastError}`;
+  }
 
   const errors = payload.errors?.length ? `部分股票评估失败：${payload.errors.join('；')}` : '';
   const warningText = [payload.warning, errors].filter(Boolean).join('。');
@@ -292,12 +299,12 @@ async function refreshData() {
   refreshButton.disabled = true;
   refreshButton.textContent = '更新中...';
   warningBox.hidden = false;
-  warningBox.textContent = '后台正在补充 Tushare 最新数据，历史缓存会持续保留。';
+  warningBox.textContent = '后台正在补充 Tushare 最新数据，已有快照会继续保留。';
   try {
     await fetch('/api/refresh', { method: 'POST' });
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await applyScreen();
-      if (!resultNote.textContent.includes('后台增量更新中')) break;
+      if (!resultNote.textContent.includes('增量更新中') && !resultNote.textContent.includes('首次加载中')) break;
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   } finally {

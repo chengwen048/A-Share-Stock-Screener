@@ -182,6 +182,17 @@ const tsState = {
 };
 
 let datasetCache = null;
+let snapshotLoaded = false;
+let dataStatus = {
+  mode: 'initializing',
+  label: '初始化中',
+  detail: '正在读取本地快照',
+  lastGoodAt: null,
+  lastGoodAtChina: null,
+  lastErrorAt: null,
+  lastErrorAtChina: null,
+  lastError: null
+};
 let refreshJob = {
   running: false,
   startedAt: null,
@@ -794,7 +805,7 @@ async function buildFullMarketRows(stockBasics, tradingDates, activeConditions) 
 }
 
 async function refreshDataset({ force = false, reason = 'manual' } = {}) {
-  const fresh = datasetCache && Date.now() - new Date(datasetCache.updatedAt).getTime() < CACHE_TTL_MS;
+  const fresh = datasetCache && reason !== 'startup' && Date.now() - new Date(datasetCache.updatedAt).getTime() < CACHE_TTL_MS;
   if (fresh && !force) return datasetCache;
   if (refreshJob.running) return refreshJob.promise;
 
@@ -810,6 +821,13 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
 
   refreshJob.promise = (async () => {
     try {
+      dataStatus = {
+        ...dataStatus,
+        mode: datasetCache ? 'refreshing' : 'loading',
+        label: datasetCache ? '增量更新中' : '首次加载中',
+        detail: datasetCache ? '正在补充最新交易日，当前快照仍可使用' : '正在从 Tushare 加载全市场数据',
+        lastError: null
+      };
       await ensureCacheDirs();
       const tradingDates = await getTradingDates();
       const endDate = tradingDates.at(-1);
@@ -841,11 +859,32 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
         localCache
       };
       await writeSnapshot(datasetCache);
+      snapshotLoaded = false;
+      dataStatus = {
+        mode: 'live',
+        label: '实时数据已更新',
+        detail: `Tushare 更新成功，股票数据更新至 ${localCache.latestTradeDateChina}`,
+        lastGoodAt: datasetCache.updatedAt,
+        lastGoodAtChina: datasetCache.updatedAtChina,
+        lastErrorAt: null,
+        lastErrorAtChina: null,
+        lastError: null
+      };
       refreshJob.finishedAt = datasetCache.updatedAt;
       refreshJob.finishedAtChina = datasetCache.updatedAtChina;
       return datasetCache;
     } catch (error) {
       refreshJob.error = error.message || '更新失败';
+      dataStatus = {
+        mode: datasetCache ? 'snapshot' : 'error',
+        label: datasetCache ? '快照可用，增量失败' : '数据加载失败',
+        detail: datasetCache ? '已保留并继续使用最近快照，Tushare 增量更新失败' : '没有可用快照，且 Tushare 加载失败',
+        lastGoodAt: datasetCache?.updatedAt ?? dataStatus.lastGoodAt,
+        lastGoodAtChina: datasetCache?.updatedAtChina ?? dataStatus.lastGoodAtChina,
+        lastErrorAt: nowIso(),
+        lastErrorAtChina: formatChinaTime(),
+        lastError: refreshJob.error
+      };
       if (!datasetCache) throw error;
       return datasetCache;
     } finally {
@@ -862,8 +901,35 @@ async function loadSnapshotIntoCache() {
     const snapshot = await readSnapshot();
     if (snapshot?.rows && Array.isArray(snapshot.rows)) {
       datasetCache = snapshot;
+      snapshotLoaded = true;
+      dataStatus = {
+        mode: 'snapshot',
+        label: '快照已加载',
+        detail: `已先使用本地快照，股票数据更新至 ${snapshot.localCache?.latestTradeDateChina ?? '-'}`,
+        lastGoodAt: snapshot.updatedAt ?? null,
+        lastGoodAtChina: snapshot.updatedAtChina ?? null,
+        lastErrorAt: null,
+        lastErrorAtChina: null,
+        lastError: null
+      };
+    } else {
+      dataStatus = {
+        ...dataStatus,
+        mode: 'empty',
+        label: '等待首次加载',
+        detail: '未找到本地快照，需要从 Tushare 加载'
+      };
     }
   } catch (error) {
+    dataStatus = {
+      ...dataStatus,
+      mode: 'error',
+      label: '快照读取失败',
+      detail: '本地快照无法读取，需要从 Tushare 加载',
+      lastErrorAt: nowIso(),
+      lastErrorAtChina: formatChinaTime(),
+      lastError: error.message || String(error)
+    };
     console.warn('读取本地快照失败:', error.message || error);
   }
 }
@@ -896,6 +962,8 @@ function screenFromCache(activeConditions) {
     activeConditionCount: activeConditions.length,
     matchedCount: results.length,
     incompleteCount: datasetCache?.incompleteRows?.length ?? 0,
+    snapshotLoaded,
+    dataStatus,
     results,
     nearMisses,
     refreshJob
@@ -915,6 +983,8 @@ app.get('/api/health', (req, res) => {
     tushareTokenConfigured: Boolean(tsState.token),
     cacheUpdatedAt: datasetCache?.updatedAt ?? null,
     cacheUpdatedAtChina: datasetCache?.updatedAtChina ?? null,
+    snapshotLoaded,
+    dataStatus,
     refreshJob
   });
 });
@@ -932,10 +1002,9 @@ app.post('/api/refresh', (req, res) => {
 app.get('/api/screen', async (req, res) => {
   const rawConditions = req.query.conditions ? JSON.parse(String(req.query.conditions)) : null;
   const activeConditions = normalizeConditions(rawConditions);
-  const cacheIsStale = !datasetCache || Date.now() - new Date(datasetCache.updatedAt).getTime() >= CACHE_TTL_MS;
 
-  if (cacheIsStale) {
-    refreshDataset({ force: false, reason: datasetCache ? 'hourly' : 'initial' }).catch(() => {});
+  if (!datasetCache && !refreshJob.running) {
+    refreshDataset({ force: false, reason: 'initial' }).catch(() => {});
   }
 
   if (!datasetCache) {
@@ -959,6 +1028,8 @@ app.get('/api/screen', async (req, res) => {
       activeConditionCount: activeConditions.length,
       tushareHttpUrl: tsState.httpUrl,
       tushareTokenConfigured: Boolean(tsState.token),
+      snapshotLoaded,
+      dataStatus,
       localCache: null,
       refreshJob
     });
@@ -969,11 +1040,15 @@ app.get('/api/screen', async (req, res) => {
 });
 
 setInterval(() => {
-  refreshDataset({ force: false, reason: 'hourly' }).catch(() => {});
+  if (!datasetCache) {
+    refreshDataset({ force: false, reason: 'hourly' }).catch(() => {});
+  }
 }, CACHE_TTL_MS);
 
 setTimeout(() => {
-  refreshDataset({ force: false, reason: 'startup' }).catch(() => {});
+  if (!datasetCache) {
+    refreshDataset({ force: false, reason: 'startup' }).catch(() => {});
+  }
 }, 1000);
 
 await loadSnapshotIntoCache();

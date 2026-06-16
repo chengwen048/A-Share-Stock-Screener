@@ -21,6 +21,10 @@
 
       <section class="status-grid" aria-live="polite">
         <div class="metric">
+          <span>股票数据状态</span>
+          <strong id="dataState">等待数据</strong>
+        </div>
+        <div class="metric">
           <span>股票数据更新至</span>
           <strong id="stockDataDate">等待数据</strong>
         </div>
@@ -83,7 +87,7 @@
         </div>
         <div>
           <span>更新方式</span>
-          <strong>手动触发 + 增量更新</strong>
+          <strong>快照优先 + 增量更新</strong>
         </div>
       </section>
 
