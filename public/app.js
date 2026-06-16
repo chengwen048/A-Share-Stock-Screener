@@ -241,7 +241,7 @@ function renderIncomplete(rows) {
 function renderPayload(payload) {
   const cache = payload.localCache;
   stockDataDate.textContent = cache?.latestTradeDateChina ?? formatTradeDateChina(cache?.latestTradeDate) ?? '等待数据';
-  updatedAt.textContent = payload.updatedAtChina ?? '正在刷新';
+  updatedAt.textContent = payload.updatedAtChina ?? '正在更新';
   expiresAt.textContent = payload.expiresAtChina ?? '-';
   scannedCount.textContent = `${payload.evaluatedCount ?? 0} / ${payload.incompleteCount ?? 0} / ${payload.stockCount ?? payload.candidateCount ?? 0}`;
   matchedCount.textContent = String(payload.matchedCount ?? 0);
@@ -258,8 +258,8 @@ function renderPayload(payload) {
     ? `更新至 ${cache.latestTradeDateChina ?? formatTradeDateChina(cache.latestTradeDate)}，${cache.historyDays} 日历史`
     : '正在建立';
   resultNote.textContent = payload.refreshJob?.running
-    ? `后台刷新中，启动于 ${payload.refreshJob.startedAtChina}`
-    : `缓存内筛选，后台每 1 小时自动更新`;
+    ? `后台增量更新中，启动于 ${payload.refreshJob.startedAtChina}`
+    : `缓存内筛选，历史数据持续保留`;
 
   const errors = payload.errors?.length ? `部分股票评估失败：${payload.errors.join('；')}` : '';
   const warningText = [payload.warning, errors].filter(Boolean).join('。');
@@ -290,19 +290,19 @@ async function applyScreen() {
 
 async function refreshData() {
   refreshButton.disabled = true;
-  refreshButton.textContent = '刷新中...';
+  refreshButton.textContent = '更新中...';
   warningBox.hidden = false;
-  warningBox.textContent = '后台正在重新拉取 Tushare 数据，完成后会自动使用新缓存。';
+  warningBox.textContent = '后台正在补充 Tushare 最新数据，历史缓存会持续保留。';
   try {
     await fetch('/api/refresh', { method: 'POST' });
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await applyScreen();
-      if (!resultNote.textContent.includes('后台刷新中')) break;
+      if (!resultNote.textContent.includes('后台增量更新中')) break;
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   } finally {
     refreshButton.disabled = false;
-    refreshButton.textContent = '刷新数据';
+    refreshButton.textContent = '增量更新';
   }
 }
 
