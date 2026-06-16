@@ -11,7 +11,7 @@
       <section class="topbar">
         <div>
           <h1>A 股股票筛选平台</h1>
-          <p>默认从 Tushare A 股全市场筛选；HTTP 地址为 <code>http://8.148.76.181:8686/</code>，历史缓存持续保留并按小时增量更新。</p>
+          <p>默认从 Tushare A 股全市场筛选；HTTP 地址为 <code>http://8.148.76.181:8686/</code>，历史缓存持续保留，不删除旧数据，只做增量补充。</p>
         </div>
         <div class="actions">
           <button id="applyButton" type="button" class="secondary">应用筛选</button>
@@ -21,11 +21,7 @@
 
       <section class="status-grid" aria-live="polite">
         <div class="metric">
-          <span>股票数据状态</span>
-          <strong id="dataState">等待数据</strong>
-        </div>
-        <div class="metric">
-          <span>股票数据更新至</span>
+          <span>股票数据更新至（交易日）</span>
           <strong id="stockDataDate">等待数据</strong>
         </div>
         <div class="metric">
@@ -63,6 +59,21 @@
 
       <section class="insight-strip">
         <div>
+          <span>服务端快照状态</span>
+          <strong id="serverSnapshotStatus">等待数据</strong>
+        </div>
+        <div>
+          <span>浏览器快照状态</span>
+          <strong id="browserSnapshotStatus">等待写入</strong>
+        </div>
+        <div>
+          <span>浏览器保存版本</span>
+          <strong id="browserSnapshotCount">0</strong>
+        </div>
+      </section>
+
+      <section class="insight-strip">
+        <div>
           <span>Tushare HTTP</span>
           <strong id="tushareHttpUrl">http://8.148.76.181:8686/</strong>
         </div>
@@ -86,8 +97,27 @@
           <strong id="localCacheStatus">等待数据</strong>
         </div>
         <div>
+          <span>数据状态</span>
+          <strong id="dataStatusText">等待数据</strong>
+        </div>
+        <div>
           <span>更新方式</span>
-          <strong>快照优先 + 增量更新</strong>
+          <strong>手动刷新 + 增量更新</strong>
+        </div>
+      </section>
+
+      <section class="insight-strip" aria-live="polite">
+        <div>
+          <span>交易日规则</span>
+          <strong>按 Tushare 交易日历自动跳过周末和节假日</strong>
+        </div>
+        <div>
+          <span>成交量口径</span>
+          <strong>页面“20日均量比”= 当日成交量 / 前20个交易日均量</strong>
+        </div>
+        <div>
+          <span>浏览器缓存</span>
+          <strong id="browserCacheStatus">等待写入</strong>
         </div>
       </section>
 

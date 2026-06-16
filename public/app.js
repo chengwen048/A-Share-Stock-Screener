@@ -1,6 +1,5 @@
 const refreshButton = document.querySelector('#refreshButton');
 const applyButton = document.querySelector('#applyButton');
-const dataState = document.querySelector('#dataState');
 const stockDataDate = document.querySelector('#stockDataDate');
 const updatedAt = document.querySelector('#updatedAt');
 const expiresAt = document.querySelector('#expiresAt');
@@ -12,6 +11,11 @@ const sourceText = document.querySelector('#sourceText');
 const tushareHttpUrl = document.querySelector('#tushareHttpUrl');
 const universeStatus = document.querySelector('#universeStatus');
 const localCacheStatus = document.querySelector('#localCacheStatus');
+const dataStatusText = document.querySelector('#dataStatusText');
+const browserCacheStatus = document.querySelector('#browserCacheStatus');
+const serverSnapshotStatus = document.querySelector('#serverSnapshotStatus');
+const browserSnapshotStatus = document.querySelector('#browserSnapshotStatus');
+const browserSnapshotCount = document.querySelector('#browserSnapshotCount');
 const resultNote = document.querySelector('#resultNote');
 const warningBox = document.querySelector('#warningBox');
 const resultsBody = document.querySelector('#resultsBody');
@@ -20,6 +24,101 @@ const incompleteBody = document.querySelector('#incompleteBody');
 const conditionList = document.querySelector('#conditionList');
 
 let conditionDefinitions = [];
+let browserDb = null;
+
+function formatChinaDateTime(value = new Date()) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).format(new Date(value));
+}
+
+function openBrowserCache() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('a-share-stock-screener', 2);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (db.objectStoreNames.contains('snapshots')) {
+        db.deleteObjectStore('snapshots');
+      }
+      if (db.objectStoreNames.contains('meta')) {
+        db.deleteObjectStore('meta');
+      }
+      if (!db.objectStoreNames.contains('snapshots')) {
+        const store = db.createObjectStore('snapshots', { keyPath: 'savedAt' });
+        store.createIndex('byTradeDate', 'tradeDate');
+        store.createIndex('bySavedAtChina', 'savedAtChina');
+      }
+      if (!db.objectStoreNames.contains('meta')) {
+        db.createObjectStore('meta', { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveBrowserCache(payload) {
+  if (!browserDb) browserDb = await openBrowserCache();
+  const savedAt = new Date();
+  const tx = browserDb.transaction(['snapshots', 'meta'], 'readwrite');
+  tx.objectStore('snapshots').put({
+    savedAt: savedAt.toISOString(),
+    savedAtChina: formatChinaDateTime(savedAt),
+    updatedAtChina: payload.updatedAtChina ?? null,
+    tradeDate: payload.localCache?.latestTradeDateChina ?? null,
+    snapshotLoaded: Boolean(payload.snapshotLoaded),
+    dataStatusLabel: payload.dataStatus?.label ?? null,
+    dataStatusDetail: payload.dataStatus?.detail ?? null,
+    payload
+  });
+  tx.objectStore('meta').put({
+    key: 'latest',
+    savedAt: savedAt.toISOString(),
+    savedAtChina: formatChinaDateTime(savedAt),
+    updatedAtChina: payload.updatedAtChina ?? null,
+    tradeDate: payload.localCache?.latestTradeDateChina ?? null,
+    snapshotLoaded: Boolean(payload.snapshotLoaded)
+  });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function loadBrowserCache() {
+  if (!browserDb) browserDb = await openBrowserCache();
+  return new Promise((resolve, reject) => {
+    const tx = browserDb.transaction(['snapshots', 'meta'], 'readonly');
+    const snapshotReq = tx.objectStore('snapshots').getAll();
+    const metaReq = tx.objectStore('meta').get('latest');
+    const result = { snapshot: null, meta: null, snapshots: [] };
+    snapshotReq.onsuccess = () => {
+      result.snapshots = snapshotReq.result ?? [];
+      result.snapshot = result.snapshots.at(-1)?.payload ?? null;
+    };
+    metaReq.onsuccess = () => {
+      result.meta = metaReq.result ?? null;
+    };
+    tx.oncomplete = () => resolve(result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function browserCacheSummary(meta, snapshots = []) {
+  return {
+    savedAtChina: meta?.savedAtChina ?? null,
+    updatedAtChina: meta?.updatedAtChina ?? null,
+    tradeDate: meta?.tradeDate ?? null,
+    snapshotCount: snapshots.length
+  };
+}
 
 function formatNumber(value, digits = 2) {
   const number = Number(value);
@@ -165,8 +264,8 @@ function renderResults(rows) {
         </td>
         <td>
           <div class="stack">
-            <span>今 ${formatNumber(metrics.todayVolumeRatio)} 倍</span>
-            <span>昨 ${formatNumber(metrics.yesterdayVolumeRatio)} 倍</span>
+            <span>今 20日均量比 ${formatNumber(metrics.todayVolumeMultiple20)} 倍</span>
+            <span>昨 20日均量比 ${formatNumber(metrics.yesterdayVolumeMultiple20)} 倍</span>
             <span>CV ${formatNumber(metrics.volumeCv20BeforeBreakout, 3)}</span>
           </div>
         </td>
@@ -212,7 +311,7 @@ function renderNearMisses(rows) {
         <td>
           <div class="stack">
             <span>收盘 ${formatNumber(metrics.close)}，MA250 ${formatNumber(metrics.ma250)}</span>
-            <span>量比 今 ${formatNumber(metrics.todayVolumeRatio)} / 昨 ${formatNumber(metrics.yesterdayVolumeRatio)}</span>
+            <span>20日均量比 今 ${formatNumber(metrics.todayVolumeMultiple20)} / 昨 ${formatNumber(metrics.yesterdayVolumeMultiple20)}</span>
             <span>主力 今 ${formatMoney(metrics.todayMainNetInflow)} / 昨 ${formatMoney(metrics.yesterdayMainNetInflow)}</span>
           </div>
         </td>
@@ -241,8 +340,7 @@ function renderIncomplete(rows) {
 
 function renderPayload(payload) {
   const cache = payload.localCache;
-  const status = payload.dataStatus ?? {};
-  dataState.textContent = status.label ?? (cache ? '快照已加载' : '等待数据');
+  const dataStatus = payload.dataStatus ?? {};
   stockDataDate.textContent = cache?.latestTradeDateChina ?? formatTradeDateChina(cache?.latestTradeDate) ?? '等待数据';
   updatedAt.textContent = payload.updatedAtChina ?? '正在更新';
   expiresAt.textContent = payload.expiresAtChina ?? '-';
@@ -260,13 +358,24 @@ function renderPayload(payload) {
   localCacheStatus.textContent = cache
     ? `更新至 ${cache.latestTradeDateChina ?? formatTradeDateChina(cache.latestTradeDate)}，${cache.historyDays} 日历史`
     : '正在建立';
+  dataStatusText.textContent = dataStatus.label
+    ? `${dataStatus.label}${dataStatus.detail ? `｜${dataStatus.detail}` : ''}`
+    : '等待数据';
+  serverSnapshotStatus.textContent = payload.snapshotLoaded
+    ? `已加载，快照生成于 ${payload.updatedAtChina ?? '-'}`
+    : dataStatus.label ?? '等待数据';
+  browserSnapshotStatus.textContent = payload.browserCache?.savedAtChina
+    ? `已写入浏览器，保存于 ${payload.browserCache.savedAtChina}`
+    : '尚未写入浏览器';
+  browserSnapshotCount.textContent = `${payload.browserCache?.snapshotCount ?? 0} 个版本`;
+  browserCacheStatus.textContent = payload.browserCache?.savedAtChina
+    ? `已保存于 ${payload.browserCache.savedAtChina}`
+    : '尚未保存';
   resultNote.textContent = payload.refreshJob?.running
-    ? `${status.label ?? '后台更新中'}，启动于 ${payload.refreshJob.startedAtChina}`
-    : `${status.detail ?? '缓存内筛选，历史数据持续保留'}`;
-  if (status.lastError) {
-    warningBox.hidden = false;
-    warningBox.textContent = `${status.label ?? '数据更新异常'}：${status.lastError}`;
-  }
+    ? `后台增量更新中，启动于 ${payload.refreshJob.startedAtChina}`
+    : dataStatus.state === 'degraded'
+      ? `快照可继续使用，最后错误：${dataStatus.lastError ?? '未知'}`
+      : `缓存内筛选，历史数据持续保留`;
 
   const errors = payload.errors?.length ? `部分股票评估失败：${payload.errors.join('；')}` : '';
   const warningText = [payload.warning, errors].filter(Boolean).join('。');
@@ -285,6 +394,13 @@ async function applyScreen() {
     const response = await fetch(`/api/screen?${params}`);
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.message || '筛选失败');
+    try {
+      await saveBrowserCache(payload);
+      const cachedAfterSave = await loadBrowserCache();
+      payload.browserCache = browserCacheSummary(cachedAfterSave.meta, cachedAfterSave.snapshots);
+    } catch (error) {
+      payload.browserCache = null;
+    }
     renderPayload(payload);
   } catch (error) {
     warningBox.hidden = false;
@@ -298,13 +414,13 @@ async function applyScreen() {
 async function refreshData() {
   refreshButton.disabled = true;
   refreshButton.textContent = '更新中...';
-  warningBox.hidden = false;
-  warningBox.textContent = '后台正在补充 Tushare 最新数据，已有快照会继续保留。';
   try {
     await fetch('/api/refresh', { method: 'POST' });
+    warningBox.hidden = false;
+    warningBox.textContent = '后台正在补充 Tushare 最新数据，历史缓存会持续保留。';
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await applyScreen();
-      if (!resultNote.textContent.includes('增量更新中') && !resultNote.textContent.includes('首次加载中')) break;
+      if (!resultNote.textContent.includes('后台增量更新中')) break;
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   } finally {
@@ -318,6 +434,28 @@ async function init() {
   const payload = await response.json();
   conditionDefinitions = payload.conditions ?? [];
   renderConditions();
+  try {
+    const cached = await loadBrowserCache();
+    if (cached.snapshot) {
+      renderPayload({ ...cached.snapshot, browserCache: browserCacheSummary(cached.meta, cached.snapshots) });
+    }
+  } catch (error) {
+    browserCacheStatus.textContent = '浏览器缓存未初始化';
+  }
+  try {
+    const snapshotResponse = await fetch('/api/snapshot');
+    if (snapshotResponse.ok) {
+      const snapshotPayload = await snapshotResponse.json();
+      await saveBrowserCache(snapshotPayload);
+      const cachedAfterSnapshotSave = await loadBrowserCache();
+      renderPayload({
+        ...snapshotPayload,
+        browserCache: browserCacheSummary(cachedAfterSnapshotSave.meta, cachedAfterSnapshotSave.snapshots)
+      });
+    }
+  } catch (error) {
+    browserCacheStatus.textContent = '服务端快照同步失败';
+  }
   await applyScreen();
 }
 

@@ -56,7 +56,7 @@ const conditionDefinitions = [
     group: '核心形态',
     description: '当天和昨天成交量 / 各自前20日均量 >= 阈值',
     defaultEnabled: true,
-    params: [{ key: 'ratioMin', label: '量比至少', type: 'number', value: 2.5, step: 0.1 }]
+    params: [{ key: 'ratioMin', label: '20日均量比至少', type: 'number', value: 2.5, step: 0.1 }]
   },
   {
     key: 'twoDayLongUpperShadow',
@@ -182,17 +182,6 @@ const tsState = {
 };
 
 let datasetCache = null;
-let snapshotLoaded = false;
-let dataStatus = {
-  mode: 'initializing',
-  label: '初始化中',
-  detail: '正在读取本地快照',
-  lastGoodAt: null,
-  lastGoodAtChina: null,
-  lastErrorAt: null,
-  lastErrorAtChina: null,
-  lastError: null
-};
 let refreshJob = {
   running: false,
   startedAt: null,
@@ -200,6 +189,8 @@ let refreshJob = {
   finishedAt: null,
   finishedAtChina: null,
   error: null,
+  lastErrorAt: null,
+  lastErrorAtChina: null,
   promise: null
 };
 
@@ -305,14 +296,78 @@ function parseKlineRow(row) {
 function parseMoneyFlowRow(row) {
   return {
     date: parseDateToIso(String(row.trade_date)),
-    superLargeIn: toNumber(row.buy_lg_amount) === null ? null : toNumber(row.buy_lg_amount) * 10000,
-    superLargeOut: toNumber(row.sell_lg_amount) === null ? null : toNumber(row.sell_lg_amount) * 10000,
-    largeIn: toNumber(row.buy_elg_amount) === null ? null : toNumber(row.buy_elg_amount) * 10000,
-    largeOut: toNumber(row.sell_elg_amount) === null ? null : toNumber(row.sell_elg_amount) * 10000,
+    superLargeIn: toNumber(row.buy_elg_amount) === null ? null : toNumber(row.buy_elg_amount) * 10000,
+    superLargeOut: toNumber(row.sell_elg_amount) === null ? null : toNumber(row.sell_elg_amount) * 10000,
+    largeIn: toNumber(row.buy_lg_amount) === null ? null : toNumber(row.buy_lg_amount) * 10000,
+    largeOut: toNumber(row.sell_lg_amount) === null ? null : toNumber(row.sell_lg_amount) * 10000,
     mediumIn: toNumber(row.buy_md_amount) === null ? null : toNumber(row.buy_md_amount) * 10000,
     mediumOut: toNumber(row.sell_md_amount) === null ? null : toNumber(row.sell_md_amount) * 10000,
     smallIn: toNumber(row.buy_sm_amount) === null ? null : toNumber(row.buy_sm_amount) * 10000,
     smallOut: toNumber(row.sell_sm_amount) === null ? null : toNumber(row.sell_sm_amount) * 10000
+  };
+}
+
+function buildDataStatus() {
+  if (!datasetCache) {
+    return {
+      state: 'loading',
+      label: refreshJob.running ? '首次加载中' : '等待快照',
+      detail: refreshJob.running ? '正在构建首份全市场快照' : '尚未完成首份快照加载',
+      snapshotLoaded: false,
+      refreshRunning: refreshJob.running,
+      actualDailyDataLatestTradeDateChina: null,
+      exchangeCalendarLatestOpenDateChina: null,
+      updatedAtChina: null,
+      lastError: refreshJob.error,
+      lastErrorAtChina: refreshJob.lastErrorAtChina,
+      nextCheckAtChina: null
+    };
+  }
+
+  if (refreshJob.running) {
+    return {
+      state: 'refreshing',
+      label: datasetCache.snapshotLoaded ? '快照可用，增量更新中' : '增量更新中',
+      detail: `启动于 ${refreshJob.startedAtChina}`,
+      snapshotLoaded: Boolean(datasetCache.snapshotLoaded),
+      refreshRunning: true,
+      actualDailyDataLatestTradeDateChina: datasetCache.localCache?.latestTradeDateChina ?? null,
+      exchangeCalendarLatestOpenDateChina: datasetCache.localCache?.calendarLatestTradeDateChina ?? null,
+      updatedAtChina: datasetCache.updatedAtChina ?? null,
+      lastError: refreshJob.error,
+      lastErrorAtChina: refreshJob.lastErrorAtChina,
+      nextCheckAtChina: datasetCache.expiresAtChina ?? null
+    };
+  }
+
+  if (refreshJob.error) {
+    return {
+      state: 'degraded',
+      label: datasetCache.snapshotLoaded ? '快照可用，更新失败' : '更新失败',
+      detail: refreshJob.error,
+      snapshotLoaded: Boolean(datasetCache.snapshotLoaded),
+      refreshRunning: false,
+      actualDailyDataLatestTradeDateChina: datasetCache.localCache?.latestTradeDateChina ?? null,
+      exchangeCalendarLatestOpenDateChina: datasetCache.localCache?.calendarLatestTradeDateChina ?? null,
+      updatedAtChina: datasetCache.updatedAtChina ?? null,
+      lastError: refreshJob.error,
+      lastErrorAtChina: refreshJob.lastErrorAtChina,
+      nextCheckAtChina: datasetCache.expiresAtChina ?? null
+    };
+  }
+
+  return {
+    state: 'ready',
+    label: datasetCache.snapshotLoaded ? '快照已加载' : '缓存已就绪',
+    detail: `最新交易日 ${datasetCache.localCache?.latestTradeDateChina ?? datasetCache.updatedAtChina ?? '-'}`,
+    snapshotLoaded: Boolean(datasetCache.snapshotLoaded),
+    refreshRunning: false,
+    actualDailyDataLatestTradeDateChina: datasetCache.localCache?.latestTradeDateChina ?? null,
+    exchangeCalendarLatestOpenDateChina: datasetCache.localCache?.calendarLatestTradeDateChina ?? null,
+    updatedAtChina: datasetCache.updatedAtChina ?? null,
+    lastError: null,
+    lastErrorAtChina: refreshJob.lastErrorAtChina,
+    nextCheckAtChina: datasetCache.expiresAtChina ?? null
   };
 }
 
@@ -420,15 +475,6 @@ async function readSnapshot() {
 
 async function writeSnapshot(payload) {
   await writeJsonFile(snapshotFile(), payload);
-}
-
-async function ensureArchiveMaterialized() {
-  await ensureCacheDirs();
-  try {
-    await fs.access(snapshotFile());
-  } catch {
-    // snapshot will be generated by the first successful refresh
-  }
 }
 
 async function getTradingDates() {
@@ -569,11 +615,17 @@ function evaluateStock(row, bars, flows, activeConditions) {
   const yesterdayVolumeRatio = yesterdayAvgVolume20 ? yesterday.volume / yesterdayAvgVolume20 : null;
   const todayUpperShadowRatio = upperShadowRatio(today);
   const yesterdayUpperShadowRatio = upperShadowRatio(yesterday);
-  const todayFlow = today ? flows.find((flow) => flow.date === today.date) ?? flows.at(-1) : null;
-  const yesterdayFlow = yesterday ? flows.find((flow) => flow.date === yesterday.date) ?? flows.at(-2) : null;
-  const todayMainNetInflow = (todayFlow?.largeIn ?? 0) - (todayFlow?.largeOut ?? 0) + (todayFlow?.superLargeIn ?? 0) - (todayFlow?.superLargeOut ?? 0);
-  const yesterdayMainNetInflow = (yesterdayFlow?.largeIn ?? 0) - (yesterdayFlow?.largeOut ?? 0) + (yesterdayFlow?.superLargeIn ?? 0) - (yesterdayFlow?.superLargeOut ?? 0);
+  const flowByDate = new Map(flows.map((flow) => [flow.date, flow]));
+  const todayFlow = today ? flowByDate.get(today.date) ?? null : null;
+  const yesterdayFlow = yesterday ? flowByDate.get(yesterday.date) ?? null : null;
+  const todayMainNetInflow = todayFlow
+    ? (todayFlow.largeIn ?? 0) - (todayFlow.largeOut ?? 0) + (todayFlow.superLargeIn ?? 0) - (todayFlow.superLargeOut ?? 0)
+    : null;
+  const yesterdayMainNetInflow = yesterdayFlow
+    ? (yesterdayFlow.largeIn ?? 0) - (yesterdayFlow.largeOut ?? 0) + (yesterdayFlow.superLargeIn ?? 0) - (yesterdayFlow.superLargeOut ?? 0)
+    : null;
   const todayAmount = today?.amount ?? null;
+  const quoteVolumeRatio = toNumber(row.quoteVolumeRatio);
   const floatMarketCap = toNumber(row.floatMarketCap);
   const marketCap = toNumber(row.marketCap);
 
@@ -589,16 +641,19 @@ function evaluateStock(row, bars, flows, activeConditions) {
     ma20,
     ma60,
     ma250,
-    closeVsMa250Pct: ma250 ? ((today.close - ma250) / ma250) * 100 : null,
-    closeVsMa20Pct: ma20 ? ((today.close - ma20) / ma20) * 100 : null,
+    closeVsMa250Pct: hasValue(ma250) && hasValue(today?.close) ? ((today.close - ma250) / ma250) * 100 : null,
+    closeVsMa20Pct: hasValue(ma20) && hasValue(today?.close) ? ((today.close - ma20) / ma20) * 100 : null,
     volumeCv20BeforeBreakout,
     todayVolumeRatio,
+    todayVolumeMultiple20: todayVolumeRatio,
     yesterdayVolumeRatio,
+    yesterdayVolumeMultiple20: yesterdayVolumeRatio,
+    quoteVolumeRatio,
     todayUpperShadowRatio,
     yesterdayUpperShadowRatio,
     todayMainNetInflow,
     yesterdayMainNetInflow,
-    todayMainMoneyRatio: todayAmount ? (todayMainNetInflow / todayAmount) * 100 : null,
+    todayMainMoneyRatio: hasValue(todayAmount) && hasValue(todayMainNetInflow) ? (todayMainNetInflow / todayAmount) * 100 : null,
     todayVolume: today?.volume ?? null,
     yesterdayVolume: yesterday?.volume ?? null,
     marketCap,
@@ -645,6 +700,8 @@ function runCondition(condition, rowOrBundle) {
   const metrics = rowOrBundle.metrics;
   const stock = rowOrBundle.stock;
   const name = stock.name ?? '';
+  const todayVolumeMultiple20 = metrics.todayVolumeMultiple20 ?? metrics.todayVolumeRatio;
+  const yesterdayVolumeMultiple20 = metrics.yesterdayVolumeMultiple20 ?? metrics.yesterdayVolumeRatio;
   switch (condition.key) {
     case 'movingAverageBullish':
       return [metrics.ma5, metrics.ma10, metrics.ma20, metrics.ma60].every(hasValue) &&
@@ -655,10 +712,10 @@ function runCondition(condition, rowOrBundle) {
       return hasValue(metrics.volumeCv20BeforeBreakout) && metrics.volumeCv20BeforeBreakout < getParam(condition, 'cvMax');
     case 'twoDayHugeVolume':
       return (
-        hasValue(metrics.todayVolumeRatio) &&
-        hasValue(metrics.yesterdayVolumeRatio) &&
-        metrics.todayVolumeRatio >= getParam(condition, 'ratioMin') &&
-        metrics.yesterdayVolumeRatio >= getParam(condition, 'ratioMin')
+        hasValue(todayVolumeMultiple20) &&
+        hasValue(yesterdayVolumeMultiple20) &&
+        todayVolumeMultiple20 >= getParam(condition, 'ratioMin') &&
+        yesterdayVolumeMultiple20 >= getParam(condition, 'ratioMin')
       );
     case 'twoDayLongUpperShadow':
       return (
@@ -716,6 +773,11 @@ function formatTradeDateChina(value) {
   if (/^\d{8}$/.test(text)) {
     return `${text.slice(0, 4)}年${text.slice(4, 6)}月${text.slice(6, 8)}日`;
   }
+  const isoText = text.slice(0, 10);
+  const isoMatch = isoText.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    return `${isoMatch[1]}年${isoMatch[2]}月${isoMatch[3]}日`;
+  }
   return new Intl.DateTimeFormat('zh-CN', {
     timeZone: CHINA_TIME_ZONE,
     year: 'numeric',
@@ -731,33 +793,41 @@ async function buildFullMarketRows(stockBasics, tradingDates, activeConditions) 
   let downloadedBasicDays = 0;
   let downloadedFlowDays = 0;
   const incompleteRows = [];
+  const populatedDailyDates = [];
 
   for (const tradeDate of recentDates) {
     const dailyWasCached = Boolean(await readJsonFile(cacheFile('daily', tradeDate)));
     const dailyRows = await getDailyByTradeDate(tradeDate);
     if (!dailyWasCached) downloadedDailyDays += 1;
-    const basicWasCached = tradeDate === recentDates.at(-1) ? Boolean(await readJsonFile(cacheFile('dailyBasic', tradeDate))) : true;
-    const basicRows = tradeDate === recentDates.at(-1) ? await getDailyBasicByTradeDate(tradeDate) : [];
-    if (!basicWasCached) downloadedBasicDays += 1;
-    const basicMap = new Map(basicRows.map((row) => [row.ts_code, row]));
+    if (dailyRows.length > 0) populatedDailyDates.push(tradeDate);
 
     for (const dailyRow of dailyRows) {
       const bucket = byCode.get(dailyRow.ts_code);
       if (!bucket) continue;
-      const basic = basicMap.get(dailyRow.ts_code);
-      bucket.bars.push(parseKlineRow({
-        ...dailyRow,
-        turnover_rate: basic?.turnover_rate ?? null
-      }));
-      if (basic) {
-        bucket.stock.marketCap = toNumber(basic.total_mv) ? toNumber(basic.total_mv) * 10000 : null;
-        bucket.stock.floatMarketCap = toNumber(basic.circ_mv) ? toNumber(basic.circ_mv) * 10000 : null;
-      }
+      bucket.bars.push(parseKlineRow(dailyRow));
     }
     await delay(180);
   }
 
-  const flowDates = tradingDates.slice(-2);
+  const latestDataDate = populatedDailyDates.at(-1) ?? recentDates.at(-1);
+  const latestDataIso = parseDateToIso(latestDataDate);
+  const basicWasCached = Boolean(await readJsonFile(cacheFile('dailyBasic', latestDataDate)));
+  const basicRows = await getDailyBasicByTradeDate(latestDataDate);
+  if (!basicWasCached) downloadedBasicDays += 1;
+  const basicMap = new Map(basicRows.map((row) => [row.ts_code, row]));
+  for (const [tsCode, bucket] of byCode.entries()) {
+    const basic = basicMap.get(tsCode);
+    if (!basic) continue;
+    bucket.stock.marketCap = toNumber(basic.total_mv) ? toNumber(basic.total_mv) * 10000 : null;
+    bucket.stock.floatMarketCap = toNumber(basic.circ_mv) ? toNumber(basic.circ_mv) * 10000 : null;
+    const latestBar = bucket.bars.find((bar) => bar.date === latestDataIso);
+    if (latestBar) latestBar.turnover = toNumber(basic.turnover_rate);
+  }
+
+  const latestDataIndex = tradingDates.indexOf(latestDataDate);
+  const flowDates = latestDataIndex >= 1
+    ? tradingDates.slice(Math.max(0, latestDataIndex - 1), latestDataIndex + 1)
+    : tradingDates.slice(-2);
   for (const tradeDate of flowDates) {
     const flowWasCached = Boolean(await readJsonFile(cacheFile('moneyflow', tradeDate)));
     const flowRows = await getMoneyFlowByTradeDate(tradeDate);
@@ -793,8 +863,10 @@ async function buildFullMarketRows(stockBasics, tradingDates, activeConditions) 
     incompleteRows,
     localCache: {
       historyDays: recentDates.length,
-      latestTradeDate: recentDates.at(-1),
-      latestTradeDateChina: formatTradeDateChina(recentDates.at(-1)),
+      calendarLatestTradeDate: recentDates.at(-1),
+      calendarLatestTradeDateChina: formatTradeDateChina(recentDates.at(-1)),
+      latestTradeDate: latestDataDate,
+      latestTradeDateChina: formatTradeDateChina(latestDataDate),
       downloadedDailyDays,
       downloadedBasicDays,
       downloadedFlowDays,
@@ -805,7 +877,7 @@ async function buildFullMarketRows(stockBasics, tradingDates, activeConditions) 
 }
 
 async function refreshDataset({ force = false, reason = 'manual' } = {}) {
-  const fresh = datasetCache && reason !== 'startup' && Date.now() - new Date(datasetCache.updatedAt).getTime() < CACHE_TTL_MS;
+  const fresh = datasetCache && Date.now() - new Date(datasetCache.updatedAt).getTime() < CACHE_TTL_MS;
   if (fresh && !force) return datasetCache;
   if (refreshJob.running) return refreshJob.promise;
 
@@ -816,18 +888,13 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
     finishedAt: null,
     finishedAtChina: null,
     error: null,
+    lastErrorAt: refreshJob.lastErrorAt ?? null,
+    lastErrorAtChina: refreshJob.lastErrorAtChina ?? null,
     promise: null
   };
 
   refreshJob.promise = (async () => {
     try {
-      dataStatus = {
-        ...dataStatus,
-        mode: datasetCache ? 'refreshing' : 'loading',
-        label: datasetCache ? '增量更新中' : '首次加载中',
-        detail: datasetCache ? '正在补充最新交易日，当前快照仍可使用' : '正在从 Tushare 加载全市场数据',
-        lastError: null
-      };
       await ensureCacheDirs();
       const tradingDates = await getTradingDates();
       const endDate = tradingDates.at(-1);
@@ -854,37 +921,22 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
         incompleteRows,
         errors: [...new Set(errors)].slice(0, 8),
         rows: results,
+        snapshotLoaded: Boolean(datasetCache?.snapshotLoaded),
         tushareTokenConfigured: Boolean(tsState.token),
         tushareHttpUrl: tsState.httpUrl,
-        localCache
+        localCache,
+        dataStatus: null
       };
+      datasetCache.dataStatus = buildDataStatus();
       await writeSnapshot(datasetCache);
-      snapshotLoaded = false;
-      dataStatus = {
-        mode: 'live',
-        label: '实时数据已更新',
-        detail: `Tushare 更新成功，股票数据更新至 ${localCache.latestTradeDateChina}`,
-        lastGoodAt: datasetCache.updatedAt,
-        lastGoodAtChina: datasetCache.updatedAtChina,
-        lastErrorAt: null,
-        lastErrorAtChina: null,
-        lastError: null
-      };
       refreshJob.finishedAt = datasetCache.updatedAt;
       refreshJob.finishedAtChina = datasetCache.updatedAtChina;
+      refreshJob.error = null;
       return datasetCache;
     } catch (error) {
       refreshJob.error = error.message || '更新失败';
-      dataStatus = {
-        mode: datasetCache ? 'snapshot' : 'error',
-        label: datasetCache ? '快照可用，增量失败' : '数据加载失败',
-        detail: datasetCache ? '已保留并继续使用最近快照，Tushare 增量更新失败' : '没有可用快照，且 Tushare 加载失败',
-        lastGoodAt: datasetCache?.updatedAt ?? dataStatus.lastGoodAt,
-        lastGoodAtChina: datasetCache?.updatedAtChina ?? dataStatus.lastGoodAtChina,
-        lastErrorAt: nowIso(),
-        lastErrorAtChina: formatChinaTime(),
-        lastError: refreshJob.error
-      };
+      refreshJob.lastErrorAt = nowIso();
+      refreshJob.lastErrorAtChina = formatChinaTime();
       if (!datasetCache) throw error;
       return datasetCache;
     } finally {
@@ -897,39 +949,17 @@ async function refreshDataset({ force = false, reason = 'manual' } = {}) {
 
 async function loadSnapshotIntoCache() {
   try {
-    await ensureArchiveMaterialized();
+    await ensureCacheDirs();
     const snapshot = await readSnapshot();
     if (snapshot?.rows && Array.isArray(snapshot.rows)) {
-      datasetCache = snapshot;
-      snapshotLoaded = true;
-      dataStatus = {
-        mode: 'snapshot',
-        label: '快照已加载',
-        detail: `已先使用本地快照，股票数据更新至 ${snapshot.localCache?.latestTradeDateChina ?? '-'}`,
-        lastGoodAt: snapshot.updatedAt ?? null,
-        lastGoodAtChina: snapshot.updatedAtChina ?? null,
-        lastErrorAt: null,
-        lastErrorAtChina: null,
-        lastError: null
+      datasetCache = {
+        ...snapshot,
+        snapshotLoaded: true,
+        dataStatus: snapshot.dataStatus ?? null
       };
-    } else {
-      dataStatus = {
-        ...dataStatus,
-        mode: 'empty',
-        label: '等待首次加载',
-        detail: '未找到本地快照，需要从 Tushare 加载'
-      };
+      datasetCache.dataStatus = buildDataStatus();
     }
   } catch (error) {
-    dataStatus = {
-      ...dataStatus,
-      mode: 'error',
-      label: '快照读取失败',
-      detail: '本地快照无法读取，需要从 Tushare 加载',
-      lastErrorAt: nowIso(),
-      lastErrorAtChina: formatChinaTime(),
-      lastError: error.message || String(error)
-    };
     console.warn('读取本地快照失败:', error.message || error);
   }
 }
@@ -962,10 +992,10 @@ function screenFromCache(activeConditions) {
     activeConditionCount: activeConditions.length,
     matchedCount: results.length,
     incompleteCount: datasetCache?.incompleteRows?.length ?? 0,
-    snapshotLoaded,
-    dataStatus,
     results,
     nearMisses,
+    snapshotLoaded: Boolean(datasetCache?.snapshotLoaded),
+    dataStatus: buildDataStatus(),
     refreshJob
   };
 }
@@ -983,8 +1013,26 @@ app.get('/api/health', (req, res) => {
     tushareTokenConfigured: Boolean(tsState.token),
     cacheUpdatedAt: datasetCache?.updatedAt ?? null,
     cacheUpdatedAtChina: datasetCache?.updatedAtChina ?? null,
-    snapshotLoaded,
-    dataStatus,
+    snapshotLoaded: Boolean(datasetCache?.snapshotLoaded),
+    dataStatus: buildDataStatus(),
+    refreshJob
+  });
+});
+
+app.get('/api/snapshot', (req, res) => {
+  if (!datasetCache) {
+    res.status(404).json({
+      ok: false,
+      message: '快照尚未加载',
+      dataStatus: buildDataStatus()
+    });
+    return;
+  }
+
+  res.json({
+    ...datasetCache,
+    snapshotLoaded: Boolean(datasetCache.snapshotLoaded),
+    dataStatus: buildDataStatus(),
     refreshJob
   });
 });
@@ -995,16 +1043,18 @@ app.post('/api/refresh', (req, res) => {
     accepted: true,
     refreshJob,
     cacheUpdatedAt: datasetCache?.updatedAt ?? null,
-    cacheUpdatedAtChina: datasetCache?.updatedAtChina ?? null
+    cacheUpdatedAtChina: datasetCache?.updatedAtChina ?? null,
+    dataStatus: buildDataStatus()
   });
 });
 
 app.get('/api/screen', async (req, res) => {
   const rawConditions = req.query.conditions ? JSON.parse(String(req.query.conditions)) : null;
   const activeConditions = normalizeConditions(rawConditions);
+  const cacheIsStale = !datasetCache || Date.now() - new Date(datasetCache.updatedAt).getTime() >= CACHE_TTL_MS;
 
-  if (!datasetCache && !refreshJob.running) {
-    refreshDataset({ force: false, reason: 'initial' }).catch(() => {});
+  if (cacheIsStale) {
+    refreshDataset({ force: false, reason: datasetCache ? 'hourly' : 'initial' }).catch(() => {});
   }
 
   if (!datasetCache) {
@@ -1026,10 +1076,10 @@ app.get('/api/screen', async (req, res) => {
       nearMisses: [],
       activeConditions,
       activeConditionCount: activeConditions.length,
+      snapshotLoaded: false,
+      dataStatus: buildDataStatus(),
       tushareHttpUrl: tsState.httpUrl,
       tushareTokenConfigured: Boolean(tsState.token),
-      snapshotLoaded,
-      dataStatus,
       localCache: null,
       refreshJob
     });
@@ -1039,20 +1089,19 @@ app.get('/api/screen', async (req, res) => {
   res.json(screenFromCache(activeConditions));
 });
 
-setInterval(() => {
-  if (!datasetCache) {
-    refreshDataset({ force: false, reason: 'hourly' }).catch(() => {});
-  }
-}, CACHE_TTL_MS);
-
-setTimeout(() => {
-  if (!datasetCache) {
-    refreshDataset({ force: false, reason: 'startup' }).catch(() => {});
-  }
-}, 1000);
-
 await loadSnapshotIntoCache();
 
 app.listen(port, () => {
   console.log(`A 股股票筛选平台已启动: http://localhost:${port}`);
 });
+
+setInterval(() => {
+  refreshDataset({ force: false, reason: 'hourly' }).catch(() => {});
+}, CACHE_TTL_MS);
+
+setTimeout(() => {
+  const cacheIsStale = !datasetCache || Date.now() - new Date(datasetCache.updatedAt).getTime() >= CACHE_TTL_MS;
+  if (cacheIsStale) {
+    refreshDataset({ force: false, reason: datasetCache ? 'startup' : 'initial' }).catch(() => {});
+  }
+}, 1000);
